@@ -50,6 +50,9 @@ maxReceiverDistance: 0
 autoDiscoverReceivers: false
 # scan radius in blocks used when autoDiscoverReceivers is true and maxReceiverDistance is 0.
 scanRadius: 50
+# caches discovered receiver locations so the world scan only runs when an item frame
+# is placed or removed. disable for debugging to force a fresh scan on every sort.
+cacheDiscoveredReceivers: true
 
 # ability to enable/disable certain chat messages
 chatMessages:

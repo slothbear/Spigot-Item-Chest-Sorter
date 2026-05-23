@@ -16,6 +16,9 @@ import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
 import org.bukkit.event.block.BlockBreakEvent
+import org.bukkit.event.hanging.HangingBreakByEntityEvent
+import org.bukkit.event.hanging.HangingBreakEvent
+import org.bukkit.event.hanging.HangingPlaceEvent
 import org.bukkit.event.inventory.InventoryCloseEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
 import org.bukkit.event.inventory.InventoryType
@@ -72,6 +75,23 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
                     showSetup(e.player)
                 }
             }
+        }
+    }
+
+    @EventHandler
+    fun onHangingBreak(e: HangingBreakEvent) {
+        if (e.entity is ItemFrame) {
+            receiverLocationCache.clear()
+            val player = (e as? HangingBreakByEntityEvent)?.remover as? Player
+            player?.sendMessage("${ChatColor.GRAY}[Vault-Tec] item frame removed — receiver cache cleared")
+        }
+    }
+
+    @EventHandler
+    fun onHangingPlace(e: HangingPlaceEvent) {
+        if (e.entity is ItemFrame) {
+            receiverLocationCache.clear()
+            e.player?.sendMessage("${ChatColor.GRAY}[Vault-Tec] item frame placed — receiver cache cleared (put an item in the frame, then close the sender chest to scan)")
         }
     }
 
@@ -143,6 +163,10 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
     private var moving = false
     private var timer: Timer? = null
 
+    // cache for autoDiscoverReceivers: maps sender.sid -> discovered chest locations
+    // invalidated whenever an item frame is placed or removed
+    private val receiverLocationCache = HashMap<String, List<Location>>()
+
     /**
      * checks the omitted inventory for a potential transfer of items
      * @param inventory Inventory of the sender chest
@@ -193,7 +217,7 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
                             }
 
                             if (useAutoDiscover) {
-                                for ((container, blocks) in findReceiversNearSender(inventory, sender)) {
+                                for ((container, blocks) in findReceiversNearSender(inventory, sender, player)) {
                                     val map = Pair(container, blocks)
                                     if (blocks != null && !blocks.any { it.type.isAir }) {
                                         realReceiver.add(map)
@@ -989,11 +1013,30 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
      */
     private fun findReceiversNearSender(
         inventory: Inventory,
-        sender: Sender
+        sender: Sender,
+        player: HumanEntity?
     ): ArrayList<Pair<Container, List<ItemStack>?>> {
         val result = ArrayList<Pair<Container, List<ItemStack>?>>()
         val senderLocation = inventory.location!!
         val world = senderLocation.world!!
+        val useCache = main.config.getBoolean("cacheDiscoveredReceivers", true)
+        val startTime = System.nanoTime()
+
+        // on a cache hit, rebuild containers from stored locations (fast block lookup)
+        // rather than repeating the expensive entity scan
+        val cachedLocations = if (useCache) receiverLocationCache[sender.sid] else null
+        if (cachedLocations != null) {
+            for (loc in cachedLocations) {
+                val block = loc.block
+                if (block.state !is Container) continue
+                val container = block.state as Container
+                val rightContainer = getRightContainer(container, block)
+                val blocks = getItemFromItemFrameNearChest(container, rightContainer)
+                result.add(Pair(container, blocks))
+            }
+            player?.sendMessage("${ChatColor.GRAY}[Vault-Tec] cache hit in %.3f ms".format((System.nanoTime() - startTime) / 1_000_000.0))
+            return result
+        }
 
         val maxDistance = main.config.getInt("maxReceiverDistance", 0)
         val searchRadius = if (maxDistance == 0) {
@@ -1035,28 +1078,40 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
             processedKeys.add(locationKey)
 
             // find the other half of a double chest and mark it processed too
-            val rightContainer = if (container.inventory is DoubleChestInventory) {
-                val dci = container.inventory as DoubleChestInventory
-                val leftBlock = dci.leftSide.location?.block
-                val otherLoc = if (leftBlock != null
-                    && leftBlock.x == chestBlock.x
-                    && leftBlock.y == chestBlock.y
-                    && leftBlock.z == chestBlock.z
-                ) {
-                    dci.rightSide.location
-                } else {
-                    dci.leftSide.location
-                }
-                if (otherLoc != null) {
-                    processedKeys.add("${otherLoc.blockX},${otherLoc.blockY},${otherLoc.blockZ}")
-                }
-                otherLoc?.block?.state as? Container
-            } else null
+            val rightContainer = getRightContainer(container, chestBlock)
+            if (rightContainer != null) {
+                val otherLoc = rightContainer.location
+                processedKeys.add("${otherLoc.blockX},${otherLoc.blockY},${otherLoc.blockZ}")
+            }
 
             val blocks = getItemFromItemFrameNearChest(container, rightContainer)
             result.add(Pair(container, blocks))
         }
 
+        if (useCache) {
+            receiverLocationCache[sender.sid] = result.map { it.first.location }
+        }
+
+        player?.sendMessage("${ChatColor.GRAY}[Vault-Tec] scan in %.3f ms (${result.size} receivers found)".format((System.nanoTime() - startTime) / 1_000_000.0))
         return result
+    }
+
+    /**
+     * returns the other half of a double chest, or null if this is a single chest
+     */
+    private fun getRightContainer(container: Container, chestBlock: org.bukkit.block.Block): Container? {
+        if (container.inventory !is DoubleChestInventory) return null
+        val dci = container.inventory as DoubleChestInventory
+        val leftBlock = dci.leftSide.location?.block
+        val otherLoc = if (leftBlock != null
+            && leftBlock.x == chestBlock.x
+            && leftBlock.y == chestBlock.y
+            && leftBlock.z == chestBlock.z
+        ) {
+            dci.rightSide.location
+        } else {
+            dci.leftSide.location
+        }
+        return otherLoc?.block?.state as? Container
     }
 }
