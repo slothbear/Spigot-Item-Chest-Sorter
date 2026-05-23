@@ -43,6 +43,14 @@ allowBreakOfChest: true
 # creation and item send events. If the value is set to '0' no limitations are in place.
 maxReceiverDistance: 0
 
+# when true, receiver chests do not need to be registered with /ics add receiver.
+# instead, the plugin scans for nearby chests that have an item frame attached and
+# sorts into any that match. moving a receiver chest is seamless: break it, place it
+# elsewhere with the same item frame, and sorting continues automatically.
+autoDiscoverReceivers: false
+# scan radius in blocks used when autoDiscoverReceivers is true and maxReceiverDistance is 0.
+scanRadius: 50
+
 # ability to enable/disable certain chat messages
 chatMessages:
   # sends a message to a player or the console after sorting, containing which and how many items are sorted

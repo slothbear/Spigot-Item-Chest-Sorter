@@ -173,8 +173,9 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
                         }
                         // loop through all chest slots
                         val receivers = sender.receiver
+                        val useAutoDiscover = main.config.getBoolean("autoDiscoverReceivers", false)
 
-                        if (receivers.size > 0) {
+                        if (receivers.size > 0 || useAutoDiscover) {
                             val airReceiver = ArrayList<Pair<Container, List<ItemStack>?>>()
                             val realReceiver = ArrayList<Pair<Container, List<ItemStack>?>>()
 
@@ -191,6 +192,16 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
                                 false
                             }
 
+                            if (useAutoDiscover) {
+                                for ((container, blocks) in findReceiversNearSender(inventory, sender)) {
+                                    val map = Pair(container, blocks)
+                                    if (blocks != null && !blocks.any { it.type.isAir }) {
+                                        realReceiver.add(map)
+                                    } else {
+                                        airReceiver.add(map)
+                                    }
+                                }
+                            } else {
                             for (receiver in receivers) {
                                 val leftLocation = cordsToLocation(receiver.cords.left)
                                 val leftBlock = leftLocation.world!!.getBlockAt(leftLocation)
@@ -241,6 +252,7 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
                                     }
                                 }
                             }
+                            } // end else (autoDiscoverReceivers)
 
                             // left over items which cannot be sorted in a chest
                             val leftOverContent = ArrayList<ItemStack?>()
@@ -963,5 +975,88 @@ class Listener(private val db: JsonHelper, private val main: ItemChestSorter) : 
      */
     private fun showNoMoreChestsMessage(sender: CommandSender) {
         sender.sendMessage("${ChatColor.RED}You are only allowed to register ${getPlayerMaxChestCount(sender as Player)} chests.")
+    }
+
+    /**
+     * discovers receiver chests by scanning for nearby chests that have an item frame attached.
+     * used when autoDiscoverReceivers is enabled in config.yml — no explicit receiver
+     * registration is required. moving a receiver chest is seamless: break it, place it
+     * elsewhere with the same item frame, and sorting continues automatically.
+     *
+     * @param inventory inventory of the sender chest
+     * @param sender sender object (used to exclude the sender chest itself)
+     * @return list of (Container, itemsInItemFrame) pairs, ready for handleItems
+     */
+    private fun findReceiversNearSender(
+        inventory: Inventory,
+        sender: Sender
+    ): ArrayList<Pair<Container, List<ItemStack>?>> {
+        val result = ArrayList<Pair<Container, List<ItemStack>?>>()
+        val senderLocation = inventory.location!!
+        val world = senderLocation.world!!
+
+        val maxDistance = main.config.getInt("maxReceiverDistance", 0)
+        val searchRadius = if (maxDistance == 0) {
+            main.config.getDouble("scanRadius", 50.0)
+        } else {
+            maxDistance.toDouble()
+        }
+
+        // find all item frames within the search radius of the sender
+        val itemFrames = world
+            .getNearbyEntities(senderLocation, searchRadius, searchRadius, searchRadius)
+            .filterIsInstance<ItemFrame>()
+
+        // track processed chest locations to avoid double-counting double chests
+        val processedKeys = HashSet<String>()
+
+        for (frame in itemFrames) {
+            // the item frame entity sits just outside the chest block face; check the
+            // frame's own block and its 6 immediate neighbours to find the chest
+            val frameBlock = frame.location.block
+            val chestBlock = (listOf(frameBlock) +
+                    listOf(BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST,
+                            BlockFace.WEST, BlockFace.UP, BlockFace.DOWN)
+                        .map { frameBlock.getRelative(it) })
+                .firstOrNull { it.state is Container } ?: continue
+
+            val locationKey = "${chestBlock.x},${chestBlock.y},${chestBlock.z}"
+            if (processedKeys.contains(locationKey)) continue
+
+            // skip the sender chest itself
+            val blockCords = locationToCords(chestBlock.location)
+            if (blockCords == sender.cords.left || blockCords == sender.cords.right) continue
+
+            val container = chestBlock.state as Container
+
+            // respect the allowShulkerBoxes config
+            if (container is ShulkerBox && !main.config.getBoolean("allowShulkerBoxes", false)) continue
+
+            processedKeys.add(locationKey)
+
+            // find the other half of a double chest and mark it processed too
+            val rightContainer = if (container.inventory is DoubleChestInventory) {
+                val dci = container.inventory as DoubleChestInventory
+                val leftBlock = dci.leftSide.location?.block
+                val otherLoc = if (leftBlock != null
+                    && leftBlock.x == chestBlock.x
+                    && leftBlock.y == chestBlock.y
+                    && leftBlock.z == chestBlock.z
+                ) {
+                    dci.rightSide.location
+                } else {
+                    dci.leftSide.location
+                }
+                if (otherLoc != null) {
+                    processedKeys.add("${otherLoc.blockX},${otherLoc.blockY},${otherLoc.blockZ}")
+                }
+                otherLoc?.block?.state as? Container
+            } else null
+
+            val blocks = getItemFromItemFrameNearChest(container, rightContainer)
+            result.add(Pair(container, blocks))
+        }
+
+        return result
     }
 }
